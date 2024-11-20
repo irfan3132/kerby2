@@ -77,7 +77,11 @@ public class KdcHandler {
             krbRequest = KrbCodec.decodeMessage(receivedMessage);
         } catch (IOException e) {
             LOG.error("Krb decoding message failed", e);
-            throw new KrbException(KrbErrorCode.KRB_AP_ERR_MSG_TYPE, "Krb decoding message failed");
+            KrbError error = createValidationError(KrbErrorCode.KRB_AP_ERR_MSG_TYPE,
+                    e.getMessage(),
+                    null, kdcContext.getKdcRealm(),
+                    null, null);
+            return encodeKrbMessage(error, isTcp);
         }
 
         KrbMessageType messageType = krbRequest.getMsgType();
@@ -87,18 +91,25 @@ public class KdcHandler {
             String realm = getRequestRealm(kdcReq);
             if (realm == null || !kdcContext.getKdcRealm().equals(realm)) {
                 LOG.error("Invalid realm from kdc request: " + realm);
-                throw new KrbException(KrbErrorCode.WRONG_REALM,
-                    "Invalid realm from kdc request: " + realm);
+                KrbError error = createValidationError(KrbErrorCode.WRONG_REALM,
+                        "Invalid realm from kdc request: " + realm,
+                        realm, kdcContext.getKdcRealm(),
+                        kdcReq.getReqBody().getCname(), kdcReq.getReqBody().getSname());
+                return encodeKrbMessage(error, isTcp);
             }
 
             if (messageType == KrbMessageType.TGS_REQ) {
                 kdcRequest = new TgsRequest((TgsReq) kdcReq, kdcContext);
-            } else if (messageType == KrbMessageType.AS_REQ) {
-                kdcRequest = new AsRequest((AsReq) kdcReq, kdcContext);
             } else {
-                LOG.error("Invalid message type: " + messageType);
-                throw new KrbException(KrbErrorCode.KRB_AP_ERR_MSG_TYPE);
+                kdcRequest = new AsRequest((AsReq) kdcReq, kdcContext);
             }
+        } else {
+            LOG.error("Invalid message type: " + messageType);
+            KrbError error = createValidationError(KrbErrorCode.KRB_AP_ERR_MSG_TYPE,
+                    "Invalid message type: " + messageType,
+                    null, kdcContext.getKdcRealm(),
+                    null, null);
+            return encodeKrbMessage(error, isTcp);
         }
 
         // For checksum
@@ -150,7 +161,11 @@ public class KdcHandler {
             }
         }
 
-        int bodyLen = krbResponse.encodingLength();
+        return encodeKrbMessage(krbResponse, isTcp);
+    }
+
+    private ByteBuffer encodeKrbMessage(KrbMessage krbMessage, boolean isTcp) throws KrbException {
+        int bodyLen = krbMessage.encodingLength();
         ByteBuffer responseMessage;
         if (isTcp) {
             responseMessage = ByteBuffer.allocate(bodyLen + 4);
@@ -158,10 +173,24 @@ public class KdcHandler {
         } else {
             responseMessage = ByteBuffer.allocate(bodyLen);
         }
-        KrbCodec.encode(krbResponse, responseMessage);
+        KrbCodec.encode(krbMessage, responseMessage);
         responseMessage.flip();
 
         return responseMessage;
+    }
+
+    private KrbError createValidationError(KrbErrorCode errorCode, String errorText, String cRealm, String realm,
+                                           PrincipalName cName, PrincipalName sName) {
+        KrbError krbError = new KrbError();
+        krbError.setStime(KerberosTime.now());
+        krbError.setSusec(100);
+        krbError.setErrorCode(errorCode);
+        krbError.setEtext(errorText);
+        krbError.setCrealm(cRealm);
+        krbError.setRealm(realm);
+        krbError.setCname(cName);
+        krbError.setSname(sName);
+        return krbError;
     }
 
     /**
